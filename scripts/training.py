@@ -171,12 +171,14 @@ if __name__ == "__main__":
     
     callbacks = []
     if args.save_checkpoints:
+        monitor_metric = config.get('monitor_metric', 'val/rmse')
+        monitor_mode = config.get('monitor_mode', 'min')
         checkpoint_callback = pl.callbacks.ModelCheckpoint(
             save_top_k=1,
             verbose=True,
-            monitor="val/rmse",
-            mode="min",
-            filename='epoch{epoch}-val-rmse{val/rmse:.4f}',
+            monitor=monitor_metric,
+            mode=monitor_mode,
+            filename='epoch{epoch}-' + monitor_metric.replace('/', '-') + '{' + monitor_metric + ':.4f}',
             auto_insert_metric_name=False,
             save_last=True
         )

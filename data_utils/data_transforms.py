@@ -14,7 +14,7 @@ class DataTransform:
     def __call__(self, window):
         data_list = []
         output = {}
-        if 'Timestamp_orig' in window.keys():
+        if 'Timestamp_orig' in window.keys() and 'Timestamp_orig' not in self.keys:
             self.keys.append('Timestamp_orig')
         for key in self.keys:
             data = torch.tensor(window.get(key).tolist())

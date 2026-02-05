@@ -1,0 +1,10 @@
+target: pl_modules.cmamba_module.CryptoMambaModule
+params:
+    num_features: 6
+    hidden_dims: [48, 64, 32, 1]
+    window_size: 48
+    d_states: 64
+    layer_density: 4
+    task: 'classification'
+    loss: 'bce'
+normalize: False

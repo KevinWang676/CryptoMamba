@@ -12,24 +12,25 @@ class CryptoMambaModule(BaseModule):
         norm_layer=nn.LayerNorm,
         d_conv=4,
         layer_density=1,
-        expand=2, 
-        mlp_ratio=0, 
-        drop=0.0, 
+        expand=2,
+        mlp_ratio=0,
+        drop=0.0,
         num_classes=None,
         d_states=16,
         use_checkpoint=False,
-        lr=0.0002, 
+        lr=0.0002,
         lr_step_size=50,
         lr_gamma=0.1,
-        weight_decay=0.0, 
+        weight_decay=0.0,
         logger_type=None,
         window_size=14,
         y_key='Close',
         optimizer='adam',
         mode='default',
         loss='rmse',
+        task='regression',
         **kwargs
-    ): 
+    ):
         super().__init__(lr=lr,
                          lr_step_size=lr_step_size,
                          lr_gamma=lr_gamma,
@@ -40,6 +41,7 @@ class CryptoMambaModule(BaseModule):
                          mode=mode,
                          window_size=window_size,
                          loss=loss,
+                         task=task,
                          )
         assert window_size == hidden_dims[0]
 
