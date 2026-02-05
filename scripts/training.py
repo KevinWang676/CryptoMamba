@@ -72,9 +72,11 @@ def get_args():
         help="batch_size",
     )
     parser.add_argument(
-        '--save_checkpoints', 
-        default=False,   
-        action='store_true',          
+        '--no_save_checkpoints',
+        dest='save_checkpoints',
+        default=True,
+        action='store_false',
+        help="Disable checkpoint saving (checkpoints are saved by default)",
     )
     parser.add_argument(
         '--use_volume', 
@@ -158,22 +160,29 @@ if __name__ == "__main__":
     else:
         raise ValueError('Unknown logger type.')
 
+    # Use distributed sampler only for multi-GPU training
+    use_distributed = args.devices > 1
     data_module = CMambaDataModule(data_config,
                                    train_transform=train_transform,
                                    val_transform=val_transform,
                                    test_transform=test_transform,
                                    batch_size=args.batch_size,
-                                   distributed_sampler=True,
+                                   distributed_sampler=use_distributed,
                                    num_workers=args.num_workers,
                                    normalize=normalize,
                                    window_size=model.window_size,
                                    )
     
     callbacks = []
+    checkpoint_callback = None
     if args.save_checkpoints:
         monitor_metric = config.get('monitor_metric', 'val/rmse')
         monitor_mode = config.get('monitor_mode', 'min')
+        # Save checkpoints to dedicated folder with config name
+        ckpt_dir = f'{ROOT}/checkpoints/{args.config}'
+        os.makedirs(ckpt_dir, exist_ok=True)
         checkpoint_callback = pl.callbacks.ModelCheckpoint(
+            dirpath=ckpt_dir,
             save_top_k=1,
             verbose=True,
             monitor=monitor_metric,
@@ -183,20 +192,29 @@ if __name__ == "__main__":
             save_last=True
         )
         callbacks.append(checkpoint_callback)
+        print(f"Checkpoints will be saved to: {ckpt_dir}")
 
     max_epochs = config.get('max_epochs', args.max_epochs)
     model.set_normalization_coeffs(data_module.factors)
 
-    trainer = pl.Trainer(accelerator=args.accelerator, 
+    # Use DDP only for multi-GPU training
+    strategy = 'auto'
+    if args.devices > 1:
+        strategy = DDPStrategy(find_unused_parameters=False)
+
+    trainer = pl.Trainer(accelerator=args.accelerator,
                          devices=args.devices,
                          max_epochs=max_epochs,
                          enable_checkpointing=args.save_checkpoints,
                          log_every_n_steps=10,
                          logger=logger,
                          callbacks=callbacks,
-                         strategy = DDPStrategy(find_unused_parameters=False),
+                         strategy=strategy,
                          )
 
-    trainer.fit(model, datamodule=data_module)
-    if args.save_checkpoints:
+    trainer.fit(model, datamodule=data_module, ckpt_path=args.resume_from_checkpoint)
+
+    if args.save_checkpoints and checkpoint_callback is not None:
+        print(f"\nBest model saved to: {checkpoint_callback.best_model_path}")
+        print(f"Last model saved to: {ckpt_dir}/last.ckpt")
         trainer.test(model, datamodule=data_module, ckpt_path=checkpoint_callback.best_model_path)
