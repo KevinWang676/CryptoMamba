@@ -142,6 +142,10 @@ if __name__ == "__main__":
 
     if not use_volume:
         use_volume = config.get('use_volume')
+
+    # Allow batch_size and num_workers to be set in config file
+    batch_size = config.get('batch_size', args.batch_size)
+    num_workers = config.get('num_workers', args.num_workers)
     train_transform = DataTransform(is_train=True, use_volume=use_volume, additional_features=config.get('additional_features', []))
     val_transform = DataTransform(is_train=False, use_volume=use_volume, additional_features=config.get('additional_features', []))
     test_transform = DataTransform(is_train=False, use_volume=use_volume, additional_features=config.get('additional_features', []))
@@ -166,9 +170,9 @@ if __name__ == "__main__":
                                    train_transform=train_transform,
                                    val_transform=val_transform,
                                    test_transform=test_transform,
-                                   batch_size=args.batch_size,
+                                   batch_size=batch_size,
                                    distributed_sampler=use_distributed,
-                                   num_workers=args.num_workers,
+                                   num_workers=num_workers,
                                    normalize=normalize,
                                    window_size=model.window_size,
                                    )

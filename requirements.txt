@@ -1,6 +1,7 @@
-#torch
-#torchvision
-#torchaudio
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch
+torchvision
+torchaudio
 setuptools
 pyaml
 lightning
@@ -10,3 +11,4 @@ pandas
 einops
 tensorboard
 mamba-ssm[causal-conv1d]
+requests
