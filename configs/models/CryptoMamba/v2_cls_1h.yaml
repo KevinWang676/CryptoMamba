@@ -1,6 +1,6 @@
 target: pl_modules.cmamba_module.CryptoMambaModule
 params:
-    num_features: 6
+    num_features: 5
     hidden_dims: [48, 64, 32, 1]
     window_size: 48
     d_states: 64

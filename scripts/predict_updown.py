@@ -67,26 +67,32 @@ def load_model(config, ckpt_path):
 
 
 def prepare_features(data, model, use_volume, normalize, data_module):
-    """Prepare feature tensor from the latest data."""
+    """Prepare feature tensor from the latest data with per-window normalization."""
     features = {}
-    key_list = ['Timestamp', 'Open', 'High', 'Low', 'Close']
+    feature_keys = ['Open', 'High', 'Low', 'Close']
     if use_volume:
-        key_list.append('Volume')
+        feature_keys.append('Volume')
 
-    for key in key_list:
+    # Reference price: first Close value in the window
+    close_values = list(data.get('Close'))
+    ref_price = close_values[0] if close_values[0] != 0 else 1.0
+
+    # Volume mean for normalization
+    if use_volume:
+        vol_values = list(data.get('Volume'))
+        vol_mean = sum(vol_values) / len(vol_values) if len(vol_values) > 0 else 1.0
+        if vol_mean == 0:
+            vol_mean = 1.0
+
+    for key in feature_keys:
         tmp = list(data.get(key))
-        if normalize and data_module.factors is not None:
-            scale = data_module.factors.get(key).get('max') - data_module.factors.get(key).get('min')
-            shift = data_module.factors.get(key).get('min')
-        else:
-            scale = 1
-            shift = 0
         if key == 'Volume':
-            tmp = [x / 1e9 for x in tmp]
-        tmp = [(x - shift) / scale for x in tmp]
+            tmp = [x / vol_mean for x in tmp]
+        elif key in ('Open', 'High', 'Low', 'Close'):
+            tmp = [x / ref_price for x in tmp]
         features[key] = torch.tensor(tmp, dtype=torch.float32).reshape(1, -1)
 
-    x = torch.cat([features.get(k) for k in features.keys()], dim=0)
+    x = torch.cat([features.get(k) for k in feature_keys], dim=0)
     return x, features
 
 
