@@ -12,3 +12,6 @@ einops
 tensorboard
 mamba-ssm[causal-conv1d]
 requests
+scikit-learn
+xgboost
+lightgbm
