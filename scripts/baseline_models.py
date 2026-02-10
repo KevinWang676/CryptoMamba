@@ -189,6 +189,59 @@ def compute_htf_indicators(htf, prefix):
     return f.replace([np.inf, -np.inf], np.nan)
 
 
+def enrich_shifted_htf_features(shifted, prefix):
+    """Add lag/regime features on top of shifted HTF indicators.
+
+    `shifted` already represents the LAST completed HTF candle for each HTF slot.
+    All derived lags/rollings therefore remain leakage-safe.
+    """
+    extra = pd.DataFrame(index=shifted.index)
+
+    key_cols = [
+        f"{prefix}_ret1",
+        f"{prefix}_macd_h",
+        f"{prefix}_rsi14",
+        f"{prefix}_atr14",
+        f"{prefix}_vr",
+        f"{prefix}_bb_w",
+        f"{prefix}_bull",
+    ]
+    for col in key_cols:
+        if col not in shifted.columns:
+            continue
+        for lag in [1, 2, 3]:
+            extra[f"{col}_lag{lag + 1}"] = shifted[col].shift(lag)
+
+    ret_col = f"{prefix}_ret1"
+    if ret_col in shifted.columns:
+        extra[f"{prefix}_ret1_mean3"] = shifted[ret_col].rolling(3).mean()
+        extra[f"{prefix}_ret1_std3"] = shifted[ret_col].rolling(3).std()
+        extra[f"{prefix}_ret1_acc1"] = shifted[ret_col] - shifted[ret_col].shift(1)
+
+    bull_col = f"{prefix}_bull"
+    if bull_col in shifted.columns:
+        extra[f"{prefix}_bull_sum3"] = shifted[bull_col].rolling(3).sum()
+        extra[f"{prefix}_bull_sum6"] = shifted[bull_col].rolling(6).sum()
+
+    rsi_col = f"{prefix}_rsi14"
+    if rsi_col in shifted.columns:
+        extra[f"{prefix}_rsi14_delta1"] = shifted[rsi_col].diff(1)
+        extra[f"{prefix}_rsi14_delta3"] = shifted[rsi_col].diff(3)
+
+    atr_col = f"{prefix}_atr14"
+    if atr_col in shifted.columns:
+        atr_ma = shifted[atr_col].rolling(10).mean().replace(0, 1e-10)
+        extra[f"{prefix}_atr_regime"] = shifted[atr_col] / atr_ma
+
+    vr_col = f"{prefix}_vr"
+    if vr_col in shifted.columns:
+        vr_ma = shifted[vr_col].rolling(10).mean().replace(0, 1e-10)
+        extra[f"{prefix}_vr_regime"] = shifted[vr_col] / vr_ma
+
+    combined = pd.concat([shifted, extra], axis=1)
+    return combined.replace([np.inf, -np.inf], np.nan)
+
+
 def add_htf_features(df, base_interval_seconds=900):
     """Add higher-timeframe features to base OHLCV data.
 
@@ -213,15 +266,78 @@ def add_htf_features(df, base_interval_seconds=900):
         indicators = compute_htf_indicators(htf, prefix)
         # Shift by 1: each row now holds the PREVIOUS completed candle's features
         shifted = indicators.shift(1)
+        enriched = enrich_shifted_htf_features(shifted, prefix)
         # Map back to base rows: each base row → its HTF group → shifted features
         base_htf_ts = (df["Timestamp"].values // period_sec) * period_sec
-        mapped = shifted.reindex(base_htf_ts)
+        mapped = enriched.reindex(base_htf_ts)
         mapped.index = df.index
         parts.append(mapped)
-        print(f"    {prefix}: {len(indicators.columns)} features "
-              f"({len(htf)} candles)")
+        n_extra = len(enriched.columns) - len(indicators.columns)
+        print(f"    {prefix}: {len(indicators.columns)} base + {n_extra} context "
+              f"features ({len(htf)} candles)")
 
     return pd.concat(parts, axis=1)
+
+
+def add_cross_timeframe_features(features, df, base_interval_seconds=900):
+    """Create cross-timeframe interaction/regime features."""
+    configs = HTF_CONFIGS.get(base_interval_seconds, [])
+    if not configs:
+        return features
+
+    prefixes = [prefix for prefix, _ in configs]
+    ret_cols = [f"{p}_ret1" for p in prefixes if f"{p}_ret1" in features.columns]
+    if ret_cols:
+        ret_mat = pd.concat([features[c] for c in ret_cols], axis=1)
+        sign_mat = np.sign(ret_mat)
+        signed_count = sign_mat.abs().sum(axis=1).replace(0, np.nan)
+        features["mtf_ret_sign_sum"] = sign_mat.sum(axis=1)
+        features["mtf_ret_abs_mean"] = ret_mat.abs().mean(axis=1)
+        features["mtf_ret_dispersion"] = ret_mat.std(axis=1)
+        features["mtf_ret_consensus"] = sign_mat.sum(axis=1).abs() / signed_count
+
+    # Base timeframe vs each HTF divergence / alignment
+    for prefix in prefixes:
+        htf_ret = f"{prefix}_ret1"
+        if "ret_1" in features.columns and htf_ret in features.columns:
+            features[f"ret1_minus_{prefix}_ret1"] = features["ret_1"] - features[htf_ret]
+
+        htf_rsi = f"{prefix}_rsi14"
+        if "rsi_14" in features.columns and htf_rsi in features.columns:
+            features[f"rsi14_minus_{prefix}_rsi14"] = features["rsi_14"] - features[htf_rsi]
+
+        htf_atr = f"{prefix}_atr14"
+        if "atr_14" in features.columns and htf_atr in features.columns:
+            den = features[htf_atr].replace(0, 1e-10)
+            features[f"atr14_over_{prefix}_atr14"] = features["atr_14"] / den
+
+    # HTF-to-HTF divergences
+    pair_candidates = [("30m", "1h"), ("1h", "4h"), ("30m", "4h"), ("4h", "1d")]
+    for a, b in pair_candidates:
+        a_ret = f"{a}_ret1"
+        b_ret = f"{b}_ret1"
+        if a_ret in features.columns and b_ret in features.columns:
+            features[f"{a}_{b}_ret_spread"] = features[a_ret] - features[b_ret]
+
+        a_macd = f"{a}_macd_h"
+        b_macd = f"{b}_macd_h"
+        if a_macd in features.columns and b_macd in features.columns:
+            features[f"{a}_{b}_macd_spread"] = features[a_macd] - features[b_macd]
+
+    # Position of current base candle inside each HTF cycle (cyclical encoding)
+    if "Timestamp" in df.columns:
+        ts = df["Timestamp"].astype(np.int64).values
+        for prefix, period_sec in configs:
+            if period_sec <= base_interval_seconds:
+                continue
+            slots = period_sec // base_interval_seconds
+            if slots <= 1:
+                continue
+            slot = ((ts // base_interval_seconds) % slots).astype(float)
+            features[f"{prefix}_slot_sin"] = np.sin(2 * np.pi * slot / slots)
+            features[f"{prefix}_slot_cos"] = np.cos(2 * np.pi * slot / slots)
+
+    return features
 
 
 # ---------------------------------------------------------------------------
@@ -416,6 +532,7 @@ def engineer_features(df, base_interval_seconds=900):
     # --- Multi-Timeframe Features ---
     htf_feats = add_htf_features(df, base_interval_seconds)
     features = pd.concat([features, htf_feats], axis=1)
+    features = add_cross_timeframe_features(features, df, base_interval_seconds)
 
     # --- Target: next candle goes UP ---
     next_close = close.shift(-1)
@@ -507,6 +624,102 @@ def optimize_ensemble_weights(prob_matrix, y_true, n_iter=4000, seed=42):
             best_weights = w
 
     return best_weights, best_logloss
+
+
+def _xgb_eval_snapshot(model):
+    """Extract train/val log-loss at best iteration for overfit diagnostics."""
+    train_ll = np.nan
+    val_ll = np.nan
+    gap = np.nan
+    best_iter = model.best_iteration
+
+    try:
+        evals = model.evals_result()
+        train_hist = evals.get("validation_0", {}).get("logloss", [])
+        val_hist = evals.get("validation_1", {}).get("logloss", [])
+        if train_hist and val_hist:
+            if best_iter is None:
+                best_iter = len(val_hist) - 1
+            best_iter = max(0, min(best_iter, len(val_hist) - 1))
+            train_ll = float(train_hist[best_iter])
+            val_ll = float(val_hist[best_iter])
+            gap = float(val_ll - train_ll)
+    except Exception:
+        pass
+
+    return {
+        "best_iter": best_iter,
+        "train_ll": train_ll,
+        "val_ll": val_ll,
+        "gap": gap,
+    }
+
+
+def fit_xgb_with_overfit_guard(X_train, y_train, X_val, y_val,
+                               sample_weight=None, primary_params=None):
+    """Train XGBoost with an overfit-aware fallback profile.
+
+    Selects the candidate minimizing:
+        score = val_logloss + gap_penalty * max(gap - max_gap, 0)
+    where gap = val_logloss - train_logloss at best iteration.
+    """
+    if primary_params is None:
+        primary_params = {}
+
+    primary_cfg = dict(primary_params)
+    strong_reg_cfg = dict(primary_cfg)
+    strong_reg_cfg.update({
+        "n_estimators": max(1600, int(primary_cfg.get("n_estimators", 1400))),
+        "max_depth": max(3, int(primary_cfg.get("max_depth", 5)) - 1),
+        "learning_rate": min(primary_cfg.get("learning_rate", 0.02), 0.015),
+        "subsample": min(primary_cfg.get("subsample", 0.9), 0.85),
+        "colsample_bytree": min(primary_cfg.get("colsample_bytree", 0.8), 0.75),
+        "colsample_bylevel": 0.7,
+        "min_child_weight": max(float(primary_cfg.get("min_child_weight", 12)), 16.0),
+        "gamma": max(float(primary_cfg.get("gamma", 0.3)), 0.4),
+        "reg_alpha": max(float(primary_cfg.get("reg_alpha", 0.3)), 0.6),
+        "reg_lambda": max(float(primary_cfg.get("reg_lambda", 1.8)), 2.2),
+        "early_stopping_rounds": max(int(primary_cfg.get("early_stopping_rounds", 50)), 60),
+    })
+
+    candidate_cfgs = [
+        ("primary", primary_cfg),
+        ("strong_regularization", strong_reg_cfg),
+    ]
+
+    gap_soft_limit = 0.010
+    gap_penalty = 0.60
+
+    best = None
+    print("  XGBoost overfit-guard candidates:")
+    for name, params in candidate_cfgs:
+        model = xgb.XGBClassifier(**params)
+        fit_kwargs = {
+            "X": X_train,
+            "y": y_train,
+            "eval_set": [(X_train, y_train), (X_val, y_val)],
+            "verbose": 0,
+        }
+        if sample_weight is not None:
+            fit_kwargs["sample_weight"] = sample_weight
+
+        model.fit(**fit_kwargs)
+        snap = _xgb_eval_snapshot(model)
+        val_ll = snap["val_ll"] if np.isfinite(snap["val_ll"]) else np.inf
+        gap = snap["gap"] if np.isfinite(snap["gap"]) else np.inf
+        score = val_ll + gap_penalty * max(gap - gap_soft_limit, 0.0)
+
+        print(f"    - {name:<22s} iter={snap['best_iter']!s:<5s} "
+              f"train_ll={snap['train_ll']:.5f} val_ll={snap['val_ll']:.5f} "
+              f"gap={snap['gap']:.5f} score={score:.5f}")
+
+        if best is None or score < best["score"]:
+            best = {"name": name, "model": model, "params": params, "snap": snap, "score": score}
+
+    print(f"  Selected XGBoost profile: {best['name']} "
+          f"(best_iter={best['snap']['best_iter']}, "
+          f"val_ll={best['snap']['val_ll']:.5f}, gap={best['snap']['gap']:.5f})")
+    return best["model"]
 
 
 # ---------------------------------------------------------------------------
@@ -855,27 +1068,32 @@ if __name__ == "__main__":
             early_stopping_rounds=50,
             **xgb_best_params,
         )
+        xgb_model.fit(
+            X_train, y_train,
+            sample_weight=train_weights,
+            eval_set=[(X_train, y_train), (X_val, y_val)],
+            verbose=0,
+        )
     else:
-        xgb_model = xgb.XGBClassifier(
-            n_estimators=1200,
+        xgb_primary_params = dict(
+            n_estimators=1400,
             max_depth=5,
             learning_rate=0.02,
             subsample=0.9,
             colsample_bytree=0.8,
-            min_child_weight=10,
-            gamma=0.2,
-            reg_alpha=0.2,
-            reg_lambda=1.5,
+            min_child_weight=12,
+            gamma=0.3,
+            reg_alpha=0.3,
+            reg_lambda=1.8,
             random_state=42,
             eval_metric="logloss",
             early_stopping_rounds=50,
         )
-    xgb_model.fit(
-        X_train, y_train,
-        sample_weight=train_weights,
-        eval_set=[(X_val, y_val)],
-        verbose=100,
-    )
+        xgb_model = fit_xgb_with_overfit_guard(
+            X_train, y_train, X_val, y_val,
+            sample_weight=train_weights,
+            primary_params=xgb_primary_params,
+        )
 
     xgb_pred = xgb_model.predict(X_test)
     xgb_prob = xgb_model.predict_proba(X_test)[:, 1]
