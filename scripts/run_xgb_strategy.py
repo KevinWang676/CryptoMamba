@@ -26,7 +26,7 @@ def get_args():
     parser.add_argument("--interval", type=str, default="15m", choices=["15m", "30m", "1h"])
     parser.add_argument("--params_json", type=str, default=None,
                         help="Optional JSON file containing xgb_params to override defaults")
-    parser.add_argument("--use_weights", action="store_true", default=True,
+    parser.add_argument("--use_weights", action="store_true", default=False,
                         help="Use return-magnitude sample weights")
     parser.add_argument("--min_bets_per_day", type=float, default=8.0)
     parser.add_argument("--max_bets_per_day", type=float, default=20.0)
@@ -84,9 +84,8 @@ def default_xgb_params():
         "n_estimators": 1400,
         "max_depth": 5,
         "learning_rate": 0.02,
-        "subsample": 0.8,
+        "subsample": 0.9,
         "colsample_bytree": 0.8,
-        "colsample_bylevel": 0.7,
         "min_child_weight": 12,
         "gamma": 0.3,
         "reg_alpha": 0.3,
@@ -144,19 +143,6 @@ if __name__ == "__main__":
         sample_weight=train_weights,
         primary_params=xgb_params,
     )
-
-    # Feature selection: retrain on non-zero importance features only
-    importances = model.feature_importances_
-    keep_mask = importances > 0
-    if keep_mask.sum() < len(keep_mask):
-        print(f"  Feature selection: {keep_mask.sum()}/{len(keep_mask)} features kept")
-        model = bm.fit_xgb_with_overfit_guard(
-            X_train[:, keep_mask], y_train, X_val[:, keep_mask], y_val,
-            sample_weight=train_weights,
-            primary_params=xgb_params,
-        )
-        X_val = X_val[:, keep_mask]
-        X_test = X_test[:, keep_mask]
 
     val_prob = model.predict_proba(X_val)[:, 1]
     test_prob = model.predict_proba(X_test)[:, 1]
