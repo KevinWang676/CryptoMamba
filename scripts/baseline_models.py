@@ -436,8 +436,8 @@ def engineer_features(df, base_interval_seconds=900):
     for period in [5, 10, 20]:
         vol_sma = volume.rolling(period).mean()
         features[f"vol_ratio_{period}"] = volume / vol_sma.replace(0, 1e-10)
-    features["vol_change_1"] = volume.pct_change(1)
-    features["vol_change_4"] = volume.pct_change(4)
+    features["vol_change_1"] = volume.pct_change(1).clip(-10, 10)
+    features["vol_change_4"] = volume.pct_change(4).clip(-10, 10)
 
     # --- 10. Candlestick features ---
     body = (close - open_).abs()
@@ -449,13 +449,11 @@ def engineer_features(df, base_interval_seconds=900):
     features["lower_shadow"] = (candle_min - low) / total_range
     features["bullish_candle"] = (close > open_).astype(int)
 
-    # --- 11. Momentum ---
-    for period in [4, 8, 16, 32]:
-        features[f"momentum_{period}"] = close / close.shift(period) - 1
+    # --- 11. Momentum --- (removed: momentum_N identical to ret_N from section 1)
 
     # --- 12. Lagged candle features ---
     for lag in [1, 2, 3, 4]:
-        features[f"lag_{lag}_ret"] = close / close.shift(lag) - 1
+        # lag_N_ret removed — identical to ret_N from section 1
         features[f"lag_{lag}_vol_ratio"] = volume / volume.shift(lag).replace(0, 1e-10)
         features[f"lag_{lag}_hl_range"] = (high.shift(lag) - low.shift(lag)) / close.shift(lag)
 
@@ -463,16 +461,11 @@ def engineer_features(df, base_interval_seconds=900):
     # Consecutive up/down candle count
     bullish = (close > close.shift(1)).astype(int)
     bearish = (close < close.shift(1)).astype(int)
-    # Count consecutive ups: reset counter on each down candle
-    consec_up = bullish.copy()
-    consec_down = bearish.copy()
-    for i in range(1, len(consec_up)):
-        if bullish.iloc[i] == 1:
-            consec_up.iloc[i] = consec_up.iloc[i - 1] + 1
-        if bearish.iloc[i] == 1:
-            consec_down.iloc[i] = consec_down.iloc[i - 1] + 1
-    features["consec_up"] = consec_up
-    features["consec_down"] = consec_down
+    # Count consecutive ups/downs (vectorized)
+    groups_up = (bullish != bullish.shift()).cumsum()
+    features["consec_up"] = bullish.groupby(groups_up).cumsum()
+    groups_dn = (bearish != bearish.shift()).cumsum()
+    features["consec_down"] = bearish.groupby(groups_dn).cumsum()
 
     # Williams %R (position relative to recent high/low)
     for period in [14, 28]:
