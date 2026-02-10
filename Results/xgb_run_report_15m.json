@@ -1,0 +1,44 @@
+{
+  "interval": "15m",
+  "xgb_params": {
+    "n_estimators": 1400,
+    "max_depth": 5,
+    "learning_rate": 0.02,
+    "subsample": 0.9,
+    "colsample_bytree": 0.8,
+    "min_child_weight": 12,
+    "gamma": 0.3,
+    "reg_alpha": 0.3,
+    "reg_lambda": 1.8,
+    "random_state": 42,
+    "eval_metric": "logloss",
+    "early_stopping_rounds": 50,
+    "tree_method": "hist"
+  },
+  "threshold_choice_val": {
+    "threshold": 0.555,
+    "accuracy": 0.5775327360441075,
+    "bets": 1451,
+    "bets_per_day": 11.89344262295082,
+    "distance_to_range": 0.0,
+    "objective": 0.5774794573555829,
+    "feasible": true
+  },
+  "threshold_metrics_test": {
+    "accuracy": 0.5929283771532184,
+    "precision": 0.5741324921135647,
+    "recall": 0.6703499079189686,
+    "f1": 0.6185216652506372,
+    "bets": 1103,
+    "bets_per_day": 8.68503937007874,
+    "edge": 9.292837715321845
+  },
+  "constraints": {
+    "min_bets_per_day": 8.0,
+    "max_bets_per_day": 20.0,
+    "target_bets_per_day": 12.0,
+    "threshold_min": 0.5,
+    "threshold_max": 0.65,
+    "threshold_step": 0.001
+  }
+}

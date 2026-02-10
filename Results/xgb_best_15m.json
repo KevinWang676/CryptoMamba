@@ -1,0 +1,131 @@
+{
+  "interval": "15m",
+  "objective_best_candidate": {
+    "selected_from": {
+      "tag": "random",
+      "trial": 18
+    },
+    "xgb_params": {
+      "n_estimators": 2948,
+      "max_depth": 9,
+      "learning_rate": 0.024160271257144234,
+      "subsample": 0.7345393906468904,
+      "colsample_bytree": 0.7790456704840496,
+      "colsample_bylevel": 0.5367747003815057,
+      "min_child_weight": 23.792169744161185,
+      "gamma": 2.1882277433883006,
+      "reg_alpha": 0.019435594145182377,
+      "reg_lambda": 0.3095016806928865,
+      "random_state": 42,
+      "eval_metric": "logloss",
+      "early_stopping_rounds": 50,
+      "tree_method": "hist"
+    },
+    "val_selection": {
+      "threshold": 0.553,
+      "accuracy": 0.587378640776699,
+      "bets": 1236,
+      "bets_per_day": 10.131147540983607,
+      "distance_to_range": 0.0,
+      "objective": 0.5864442145471908,
+      "feasible": true
+    },
+    "test_metrics_at_selected_threshold": {
+      "accuracy": 0.5768822905620361,
+      "precision": 0.5655296229802513,
+      "recall": 0.6673728813559322,
+      "f1": 0.6122448979591837,
+      "bets": 943,
+      "bets_per_day": 7.425196850393701,
+      "edge": 7.68822905620361
+    },
+    "overfit_diagnostics": {
+      "best_iter": 34,
+      "train_ll": 0.6707601451325446,
+      "val_ll": 0.6904613572590135,
+      "gap": 0.019701212126468914
+    }
+  },
+  "robustness_cv": {
+    "baseline": {
+      "mean_acc": 0.5953736521605223,
+      "std_acc": 0.009361274809991238,
+      "mean_bpd": 9.909322865554465
+    },
+    "candidate": {
+      "mean_acc": 0.587340131087119,
+      "std_acc": 0.008903095925624636,
+      "mean_bpd": 8.386261040235524
+    },
+    "robust_margin": 0.001
+  },
+  "final_selection": {
+    "tag": "baseline",
+    "xgb_params": {
+      "n_estimators": 1400,
+      "max_depth": 5,
+      "learning_rate": 0.02,
+      "subsample": 0.9,
+      "colsample_bytree": 0.8,
+      "min_child_weight": 12,
+      "gamma": 0.3,
+      "reg_alpha": 0.3,
+      "reg_lambda": 1.8,
+      "random_state": 42,
+      "eval_metric": "logloss",
+      "early_stopping_rounds": 50,
+      "tree_method": "hist"
+    },
+    "val_selection": {
+      "threshold": 0.555,
+      "accuracy": 0.5775327360441075,
+      "bets": 1451,
+      "bets_per_day": 11.89344262295082,
+      "distance_to_range": 0.0,
+      "objective": 0.5774794573555829,
+      "feasible": true
+    },
+    "test_metrics_at_selected_threshold": {
+      "accuracy": 0.5929283771532184,
+      "precision": 0.5741324921135647,
+      "recall": 0.6703499079189686,
+      "f1": 0.6185216652506372,
+      "bets": 1103,
+      "bets_per_day": 8.68503937007874,
+      "edge": 9.292837715321845
+    },
+    "overfit_diagnostics": {
+      "best_iter": 60,
+      "train_ll": 0.6833508899335076,
+      "val_ll": 0.6909929899972116,
+      "gap": 0.007642100063704027
+    }
+  },
+  "xgb_params": {
+    "n_estimators": 1400,
+    "max_depth": 5,
+    "learning_rate": 0.02,
+    "subsample": 0.9,
+    "colsample_bytree": 0.8,
+    "min_child_weight": 12,
+    "gamma": 0.3,
+    "reg_alpha": 0.3,
+    "reg_lambda": 1.8,
+    "random_state": 42,
+    "eval_metric": "logloss",
+    "early_stopping_rounds": 50,
+    "tree_method": "hist"
+  },
+  "selected_threshold": 0.555,
+  "search_config": {
+    "trials": 20,
+    "seed": 20260210,
+    "use_weights": false,
+    "min_bets_per_day": 8.0,
+    "max_bets_per_day": 20.0,
+    "target_bets_per_day": 12.0,
+    "threshold_min": 0.5,
+    "threshold_max": 0.65,
+    "threshold_step": 0.001
+  }
+}
