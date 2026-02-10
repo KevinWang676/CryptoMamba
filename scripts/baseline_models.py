@@ -93,6 +93,18 @@ def get_args():
                         help="Use Optuna to tune LightGBM/CatBoost/XGBoost hyperparameters")
     parser.add_argument("--tune_trials", type=int, default=100,
                         help="Number of Optuna trials (default: 100)")
+    parser.add_argument("--min_bets_per_day", type=float, default=8.0,
+                        help="Minimum target trading frequency for threshold optimization")
+    parser.add_argument("--max_bets_per_day", type=float, default=20.0,
+                        help="Maximum target trading frequency for threshold optimization")
+    parser.add_argument("--target_bets_per_day", type=float, default=12.0,
+                        help="Preferred bets/day within [min_bets_per_day, max_bets_per_day]")
+    parser.add_argument("--threshold_min", type=float, default=0.50,
+                        help="Lower bound of threshold search")
+    parser.add_argument("--threshold_max", type=float, default=0.65,
+                        help="Upper bound of threshold search")
+    parser.add_argument("--threshold_step", type=float, default=0.001,
+                        help="Step size of threshold search")
     return parser.parse_args()
 
 
@@ -722,6 +734,128 @@ def fit_xgb_with_overfit_guard(X_train, y_train, X_val, y_val,
     return best["model"]
 
 
+def optimize_threshold_for_accuracy(
+    y_true, y_prob, num_days,
+    min_bpd=8.0, max_bpd=20.0, target_bpd=12.0,
+    t_min=0.50, t_max=0.65, t_step=0.001,
+):
+    """Find a confidence threshold that maximizes accuracy with activity control."""
+    y_true = np.asarray(y_true)
+    y_prob = clip_probs(y_prob)
+
+    if t_step <= 0:
+        raise ValueError("threshold_step must be positive")
+    if t_max < t_min:
+        raise ValueError("threshold_max must be >= threshold_min")
+
+    thresholds = np.arange(t_min, t_max + 1e-12, t_step)
+    confidence = np.maximum(y_prob, 1.0 - y_prob)
+
+    best_feasible = None
+    best_global = None
+
+    for t in thresholds:
+        mask = confidence > t
+        n_bets = int(mask.sum())
+        if n_bets == 0:
+            continue
+
+        bpd = n_bets / max(num_days, 1e-12)
+        pred = (y_prob[mask] > 0.5).astype(int)
+        acc = float(accuracy_score(y_true[mask], pred))
+
+        # Outside-range distance (0 means feasible).
+        if bpd < min_bpd:
+            dist = min_bpd - bpd
+        elif bpd > max_bpd:
+            dist = bpd - max_bpd
+        else:
+            dist = 0.0
+
+        # Hard-priority objective:
+        # 1) maximize accuracy
+        # 2) satisfy activity range
+        # 3) prefer target activity in range
+        objective = acc - 0.020 * dist - 0.0005 * abs(bpd - target_bpd)
+
+        row = {
+            "threshold": float(t),
+            "accuracy": acc,
+            "bets": n_bets,
+            "bets_per_day": float(bpd),
+            "distance_to_range": float(dist),
+            "objective": float(objective),
+            "feasible": bool(dist == 0.0),
+        }
+
+        if best_global is None or row["objective"] > best_global["objective"]:
+            best_global = row
+
+        if row["feasible"]:
+            if best_feasible is None:
+                best_feasible = row
+            else:
+                a = (
+                    row["accuracy"],
+                    -abs(row["bets_per_day"] - target_bpd),
+                    row["bets"],
+                    -row["threshold"],
+                )
+                b = (
+                    best_feasible["accuracy"],
+                    -abs(best_feasible["bets_per_day"] - target_bpd),
+                    best_feasible["bets"],
+                    -best_feasible["threshold"],
+                )
+                if a > b:
+                    best_feasible = row
+
+    if best_feasible is not None:
+        return best_feasible
+    if best_global is not None:
+        return best_global
+    return {
+        "threshold": np.nan,
+        "accuracy": np.nan,
+        "bets": 0,
+        "bets_per_day": 0.0,
+        "distance_to_range": np.nan,
+        "objective": -np.inf,
+        "feasible": False,
+    }
+
+
+def evaluate_threshold_on_split(y_true, y_prob, threshold, num_days):
+    """Evaluate thresholded betting metrics on a split."""
+    y_prob = clip_probs(y_prob)
+    confidence = np.maximum(y_prob, 1.0 - y_prob)
+    mask = confidence > threshold
+    n_bets = int(mask.sum())
+    if n_bets == 0:
+        return {
+            "accuracy": np.nan,
+            "precision": np.nan,
+            "recall": np.nan,
+            "f1": np.nan,
+            "bets": 0,
+            "bets_per_day": 0.0,
+            "edge": np.nan,
+        }
+
+    pred = (y_prob[mask] > 0.5).astype(int)
+    y_sel = np.asarray(y_true)[mask]
+    acc = float(accuracy_score(y_sel, pred))
+    return {
+        "accuracy": acc,
+        "precision": float(precision_score(y_sel, pred, zero_division=0)),
+        "recall": float(recall_score(y_sel, pred, zero_division=0)),
+        "f1": float(f1_score(y_sel, pred, zero_division=0)),
+        "bets": n_bets,
+        "bets_per_day": n_bets / max(num_days, 1e-12),
+        "edge": (acc - 0.5) * 100.0,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Threshold-based betting analysis
 # ---------------------------------------------------------------------------
@@ -837,6 +971,90 @@ def print_threshold_table(all_results, num_days_val, num_days_test):
     print(f"\n  {'=' * 78}")
 
 
+def print_constrained_threshold_report(
+    results,
+    y_val,
+    y_test,
+    val_days,
+    test_days,
+    min_bpd,
+    max_bpd,
+    target_bpd,
+    t_min,
+    t_max,
+    t_step,
+):
+    """Print per-model thresholds selected under one shared activity constraint."""
+
+    def fmt_float(x, digits=4):
+        return f"{x:.{digits}f}" if np.isfinite(x) else "N/A"
+
+    rows = []
+    for model_name, (_, test_prob, val_prob) in results.items():
+        choice = optimize_threshold_for_accuracy(
+            y_true=y_val,
+            y_prob=val_prob,
+            num_days=val_days,
+            min_bpd=min_bpd,
+            max_bpd=max_bpd,
+            target_bpd=target_bpd,
+            t_min=t_min,
+            t_max=t_max,
+            t_step=t_step,
+        )
+        test_stats = evaluate_threshold_on_split(
+            y_true=y_test,
+            y_prob=test_prob,
+            threshold=choice["threshold"],
+            num_days=test_days,
+        )
+        rows.append((model_name, choice, test_stats))
+
+    rows.sort(
+        key=lambda x: (
+            x[1]["accuracy"] if np.isfinite(x[1]["accuracy"]) else -1.0,
+            -abs(x[1]["bets_per_day"] - target_bpd)
+            if np.isfinite(x[1]["bets_per_day"])
+            else -np.inf,
+        ),
+        reverse=True,
+    )
+
+    print(f"\n{'=' * 112}")
+    print("  CONSTRAINED THRESHOLD SELECTION (VAL-SELECTED, TEST-REPORTED)")
+    print(f"  Constraint: bets/day in [{min_bpd:.2f}, {max_bpd:.2f}], target={target_bpd:.2f}")
+    print(f"  Search range: threshold in [{t_min:.3f}, {t_max:.3f}] with step={t_step:.3f}")
+    print(f"{'=' * 112}")
+    print(f"  {'Model':<18s} {'Thr':>6s} {'ValAcc':>8s} {'Val/Day':>8s} {'ValBets':>8s} "
+          f"{'TestAcc':>8s} {'Test/Day':>9s} {'TestBets':>9s} {'Edge':>8s} {'Feasible':>9s}")
+    print(f"  {'-' * 18} {'-' * 6} {'-' * 8} {'-' * 8} {'-' * 8} "
+          f"{'-' * 8} {'-' * 9} {'-' * 9} {'-' * 8} {'-' * 9}")
+
+    for model_name, choice, test_stats in rows:
+        thr = choice["threshold"]
+        val_acc = choice["accuracy"]
+        val_bpd = choice["bets_per_day"]
+        val_bets = choice["bets"]
+        test_acc = test_stats["accuracy"]
+        test_bpd = test_stats["bets_per_day"]
+        test_bets = test_stats["bets"]
+        edge = test_stats["edge"]
+        feasible = "Yes" if choice["feasible"] else "No"
+
+        print(f"  {model_name:<18s} "
+              f"{thr:>6.3f} "
+              f"{fmt_float(val_acc):>8s} "
+              f"{fmt_float(val_bpd, 2):>8s} "
+              f"{val_bets:>8d} "
+              f"{fmt_float(test_acc):>8s} "
+              f"{fmt_float(test_bpd, 2):>9s} "
+              f"{test_bets:>9d} "
+              f"{fmt_float(edge, 2):>7s}% "
+              f"{feasible:>9s}")
+
+    print(f"{'=' * 112}")
+
+
 # ---------------------------------------------------------------------------
 # Optuna Hyperparameter Tuning
 # ---------------------------------------------------------------------------
@@ -915,26 +1133,32 @@ def tune_cat_optuna(X_train, y_train, X_val, y_val, n_trials=100,
     return study.best_params
 
 
-def tune_xgb_optuna(X_train, y_train, X_val, y_val, n_trials=100,
-                    sample_weight=None):
-    """Tune XGBoost hyperparameters with Optuna."""
+def tune_xgb_optuna(
+    X_train, y_train, X_val, y_val, val_days,
+    n_trials=100, sample_weight=None,
+    min_bpd=8.0, max_bpd=20.0, target_bpd=12.0,
+    t_min=0.50, t_max=0.65, t_step=0.001,
+):
+    """Tune XGBoost hyperparameters jointly with threshold selection."""
     import optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
     def objective(trial):
         params = {
             "n_estimators": 3000,
-            "max_depth": trial.suggest_int("max_depth", 3, 8),
+            "max_depth": trial.suggest_int("max_depth", 3, 9),
             "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
-            "subsample": trial.suggest_float("subsample", 0.5, 1.0),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 1.0),
-            "min_child_weight": trial.suggest_int("min_child_weight", 1, 50),
-            "gamma": trial.suggest_float("gamma", 0.0, 5.0),
-            "reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
-            "reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
+            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+            "colsample_bylevel": trial.suggest_float("colsample_bylevel", 0.5, 1.0),
+            "min_child_weight": trial.suggest_float("min_child_weight", 2.0, 80.0),
+            "gamma": trial.suggest_float("gamma", 0.0, 8.0),
+            "reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 30.0, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 30.0, log=True),
             "random_state": 42,
             "eval_metric": "logloss",
             "early_stopping_rounds": 50,
+            "tree_method": "hist",
         }
         model = xgb.XGBClassifier(**params)
         model.fit(
@@ -944,14 +1168,37 @@ def tune_xgb_optuna(X_train, y_train, X_val, y_val, n_trials=100,
             verbose=0,
         )
         val_prob = model.predict_proba(X_val)[:, 1]
-        val_pred = (val_prob > 0.5).astype(int)
-        return accuracy_score(y_val, val_pred)
+        best_thr = optimize_threshold_for_accuracy(
+            y_true=y_val,
+            y_prob=val_prob,
+            num_days=val_days,
+            min_bpd=min_bpd,
+            max_bpd=max_bpd,
+            target_bpd=target_bpd,
+            t_min=t_min,
+            t_max=t_max,
+            t_step=t_step,
+        )
+        trial.set_user_attr("best_threshold", best_thr["threshold"])
+        trial.set_user_attr("val_bet_acc", best_thr["accuracy"])
+        trial.set_user_attr("val_bets_per_day", best_thr["bets_per_day"])
+        trial.set_user_attr("feasible", bool(best_thr["feasible"]))
+        return best_thr["objective"]
 
     study = optuna.create_study(direction="maximize")
     study.optimize(objective, n_trials=n_trials)
 
-    print(f"\n  Optuna XGBoost — Best val accuracy: {study.best_value:.4f}")
+    best_trial = study.best_trial
+    best_threshold = best_trial.user_attrs.get("best_threshold", np.nan)
+    best_val_bet_acc = best_trial.user_attrs.get("val_bet_acc", np.nan)
+    best_val_bpd = best_trial.user_attrs.get("val_bets_per_day", np.nan)
+    best_feasible = best_trial.user_attrs.get("feasible", False)
+
+    print(f"\n  Optuna XGBoost — Best objective: {study.best_value:.4f}")
     print(f"  Best params: {study.best_params}")
+    print(f"  Best threshold on val: {best_threshold:.3f} "
+          f"(val bet-acc={best_val_bet_acc:.4f}, val bets/day={best_val_bpd:.2f}, "
+          f"feasible={best_feasible})")
     return study.best_params
 
 
@@ -960,6 +1207,15 @@ def tune_xgb_optuna(X_train, y_train, X_val, y_val, n_trials=100,
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     args = get_args()
+    if args.min_bets_per_day <= 0:
+        raise ValueError("--min_bets_per_day must be > 0")
+    if args.max_bets_per_day < args.min_bets_per_day:
+        raise ValueError("--max_bets_per_day must be >= --min_bets_per_day")
+    if args.threshold_step <= 0:
+        raise ValueError("--threshold_step must be > 0")
+    if args.threshold_max < args.threshold_min:
+        raise ValueError("--threshold_max must be >= --threshold_min")
+
     config = INTERVAL_CONFIG[args.interval]
     date_fmt = "%Y-%m-%d %H:%M:%S"
 
@@ -1006,6 +1262,8 @@ if __name__ == "__main__":
     print(f"\n  Train: {len(X_train):>6d} samples  (UP ratio: {y_train.mean():.3f})")
     print(f"  Val:   {len(X_val):>6d} samples  (UP ratio: {y_val.mean():.3f})")
     print(f"  Test:  {len(X_test):>6d} samples  (UP ratio: {y_test.mean():.3f})")
+    val_days = (val_e - val_s) / 86400
+    test_days = (test_e - test_s) / 86400
 
     # ------------------------------------------------------------------
     # 3b. Compute sample weights (optional, off by default)
@@ -1058,21 +1316,28 @@ if __name__ == "__main__":
     if args.tune:
         print("  Running Optuna hyperparameter search...")
         xgb_best_params = tune_xgb_optuna(
-            X_train, y_train, X_val, y_val,
-            n_trials=args.tune_trials, sample_weight=train_weights,
+            X_train, y_train, X_val, y_val, val_days=val_days,
+            n_trials=args.tune_trials,
+            sample_weight=train_weights,
+            min_bpd=args.min_bets_per_day,
+            max_bpd=args.max_bets_per_day,
+            target_bpd=args.target_bets_per_day,
+            t_min=args.threshold_min,
+            t_max=args.threshold_max,
+            t_step=args.threshold_step,
         )
-        xgb_model = xgb.XGBClassifier(
+        xgb_primary_params = dict(
             n_estimators=3000,
             random_state=42,
             eval_metric="logloss",
             early_stopping_rounds=50,
             **xgb_best_params,
         )
-        xgb_model.fit(
+        xgb_model = fit_xgb_with_overfit_guard(
             X_train, y_train,
+            X_val, y_val,
             sample_weight=train_weights,
-            eval_set=[(X_train, y_train), (X_val, y_val)],
-            verbose=0,
+            primary_params=xgb_primary_params,
         )
     else:
         xgb_primary_params = dict(
@@ -1102,6 +1367,33 @@ if __name__ == "__main__":
     xgb_val_pred = xgb_model.predict(X_val)
     xgb_val_prob = xgb_model.predict_proba(X_val)[:, 1]
     evaluate(y_val, xgb_val_pred, xgb_val_prob, f"XGBoost - {args.interval} Val")
+
+    xgb_thr_choice = optimize_threshold_for_accuracy(
+        y_true=y_val,
+        y_prob=xgb_val_prob,
+        num_days=val_days,
+        min_bpd=args.min_bets_per_day,
+        max_bpd=args.max_bets_per_day,
+        target_bpd=args.target_bets_per_day,
+        t_min=args.threshold_min,
+        t_max=args.threshold_max,
+        t_step=args.threshold_step,
+    )
+    xgb_thr_test = evaluate_threshold_on_split(
+        y_true=y_test,
+        y_prob=xgb_prob,
+        threshold=xgb_thr_choice["threshold"],
+        num_days=test_days,
+    )
+    print("\n  XGBoost Optimal Threshold (val-selected):")
+    print(f"    threshold:   {xgb_thr_choice['threshold']:.3f}")
+    print(f"    val bet acc: {xgb_thr_choice['accuracy']:.4f} "
+          f"(bets/day: {xgb_thr_choice['bets_per_day']:.2f}, "
+          f"feasible: {xgb_thr_choice['feasible']})")
+    print(f"    test bet acc:{xgb_thr_test['accuracy']:.4f} "
+          f"(bets/day: {xgb_thr_test['bets_per_day']:.2f}, "
+          f"bets: {xgb_thr_test['bets']})")
+    print(f"    test edge:   {xgb_thr_test['edge']:+.2f}%")
     results["XGBoost"] = (xgb_acc, xgb_prob, xgb_val_prob)
 
     # ==================================================================
@@ -1403,17 +1695,19 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     # 10. Threshold-based betting analysis
     # ------------------------------------------------------------------
-    # Compute number of calendar days in val and test periods
-    val_days = (val_e - val_s) / 86400
-    test_days = (test_e - test_s) / 86400
-
-    threshold_results = {}  # name -> (val_results, test_results)
-    for name, (acc, test_prob, val_prob) in results.items():
-        val_res = threshold_analysis(y_val, val_prob, name, val_days)
-        test_res = threshold_analysis(y_test, test_prob, name, test_days)
-        threshold_results[name] = (val_res, test_res)
-
-    print_threshold_table(threshold_results, val_days, test_days)
+    print_constrained_threshold_report(
+        results=results,
+        y_val=y_val,
+        y_test=y_test,
+        val_days=val_days,
+        test_days=test_days,
+        min_bpd=args.min_bets_per_day,
+        max_bpd=args.max_bets_per_day,
+        target_bpd=args.target_bets_per_day,
+        t_min=args.threshold_min,
+        t_max=args.threshold_max,
+        t_step=args.threshold_step,
+    )
 
     # ------------------------------------------------------------------
     # 11. Save models (optional)
